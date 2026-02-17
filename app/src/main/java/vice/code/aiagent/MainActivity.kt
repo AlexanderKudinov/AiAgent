@@ -33,7 +33,6 @@ import com.google.ai.client.generativeai.GenerativeModel
 import kotlinx.coroutines.launch
 import vice.code.aiagent.ui.theme.AIAgentTheme
 
-// Data class to represent a chat message
 data class ChatMessage(val text: String, val isUser: Boolean)
 
 class MainActivity : ComponentActivity() {
@@ -52,11 +51,10 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ChatScreen(modifier: Modifier = Modifier) {
-    // IMPORTANT: Replace "YOUR_API_KEY" with a real key from https://aistudio.google.com/app/apikey
-    val apiKey = "YOUR_API_KEY"
+    val apiKey = ""
     val generativeModel = remember {
         GenerativeModel(
-            modelName = "gemini-1.5-flash",
+            modelName = "gemini-3-flash-preview",
             apiKey = apiKey
         )
     }
