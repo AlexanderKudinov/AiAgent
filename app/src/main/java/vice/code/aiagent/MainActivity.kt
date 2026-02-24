@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -23,13 +24,13 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.google.ai.client.generativeai.GenerativeModel
 import kotlinx.coroutines.launch
 import vice.code.aiagent.ui.theme.AIAgentTheme
 
@@ -52,19 +53,16 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ChatScreen(modifier: Modifier = Modifier) {
     val apiKey = ""
-    val generativeModel = remember {
-        GenerativeModel(
-            modelName = "gemini-3-flash-preview",
-            apiKey = apiKey
-        )
-    }
+    val agent = remember { AIAgent(apiKey = apiKey, modelName = "gemini-2.5-flash") }
 
+    // Состояния UI
     val messages = remember { mutableStateListOf<ChatMessage>() }
-    var inputMessage by remember { mutableStateOf("") }
+    var inputMessage by rememberSaveable { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     Column(modifier = modifier.fillMaxSize()) {
+        // Список сообщений
         LazyColumn(
             modifier = Modifier
                 .weight(1f)
@@ -73,21 +71,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(messages) { message ->
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start
-                ) {
-                    Text(
-                        text = if (message.isUser) "You" else "Gemini AI",
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                        color = Color.Gray
-                    )
-                    Text(
-                        text = message.text,
-                        modifier = Modifier
-                            .padding(vertical = 4.dp)
-                    )
-                }
+                MessageItem(message = message)
             }
             if (isLoading) {
                 item {
@@ -96,6 +80,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        // Поле ввода и кнопка отправки
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -105,37 +90,51 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             OutlinedTextField(
                 value = inputMessage,
                 onValueChange = { inputMessage = it },
-                label = { Text("Enter your message") },
+                label = { Text("Введите сообщение") },
                 modifier = Modifier.weight(1f),
                 enabled = !isLoading
             )
             Button(
                 onClick = {
-                    if (inputMessage.isNotBlank()) {
-                        val userText = inputMessage.trim()
-                        messages.add(ChatMessage(userText, true))
+                    val userText = inputMessage.trim()
+                    if (userText.isNotBlank()) {
+                        // Добавляем сообщение пользователя
+                        messages.add(ChatMessage(text = userText, isUser = true))
                         inputMessage = ""
                         isLoading = true
 
                         coroutineScope.launch {
-                            try {
-                                val response = generativeModel.generateContent(userText)
-                                val responseText = response.text ?: "No response from AI."
-                                messages.add(ChatMessage(responseText, false))
-                            } catch (e: Exception) {
-                                messages.add(ChatMessage("Error: ${e.localizedMessage}", false))
-                            } finally {
-                                isLoading = false
-                            }
+                            // Вызов агента (инкапсулированная логика)
+                            val responseText = agent.sendMessage(userText)
+                            messages.add(ChatMessage(text = responseText, isUser = false))
+                            isLoading = false
                         }
                     }
                 },
                 modifier = Modifier.padding(start = 8.dp),
                 enabled = !isLoading && inputMessage.isNotBlank()
             ) {
-                Text("Send")
+                Text("Отправить")
             }
         }
+    }
+}
+
+@Composable
+fun MessageItem(message: ChatMessage) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start
+    ) {
+        Text(
+            text = if (message.isUser) "Вы" else "Ассистент",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.Gray
+        )
+        Text(
+            text = message.text,
+            modifier = Modifier.padding(vertical = 4.dp)
+        )
     }
 }
 
