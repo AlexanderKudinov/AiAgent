@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -31,9 +32,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext // Added
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import vice.code.aiagent.ui.theme.AIAgentTheme
 
+@Serializable
 data class ChatMessage(val text: String, val isUser: Boolean)
 
 class MainActivity : ComponentActivity() {
@@ -52,14 +56,22 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ChatScreen(modifier: Modifier = Modifier) {
+    val context = LocalContext.current // Get context
     val apiKey = ""
-    val agent = remember { AIAgent(apiKey = apiKey, modelName = "gemini-2.5-flash") }
+
+    // Создаём агента один раз, передавая context
+    val agent = remember { AIAgent(context = context, apiKey = apiKey, modelName = "gemini-2.5-flash") }
 
     // Состояния UI
     val messages = remember { mutableStateListOf<ChatMessage>() }
     var inputMessage by rememberSaveable { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+
+    // Загружаем историю чата при первом запуске ChatScreen
+    LaunchedEffect(Unit) {
+        messages.addAll(agent.loadChatHistory())
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         // Список сообщений
@@ -102,11 +114,13 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                         messages.add(ChatMessage(text = userText, isUser = true))
                         inputMessage = ""
                         isLoading = true
+                        agent.saveChatHistory(messages) // Сохраняем историю после добавления сообщения пользователя
 
                         coroutineScope.launch {
                             // Вызов агента (инкапсулированная логика)
                             val responseText = agent.sendMessage(userText)
                             messages.add(ChatMessage(text = responseText, isUser = false))
+                            agent.saveChatHistory(messages) // Сохраняем историю после получения ответа от LLM
                             isLoading = false
                         }
                     }
