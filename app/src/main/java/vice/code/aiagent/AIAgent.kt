@@ -1,17 +1,29 @@
 package vice.code.aiagent
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.client.generativeai.GenerativeModel
 import com.google.ai.client.generativeai.Chat
 import com.google.ai.client.generativeai.type.content
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import androidx.core.content.edit
+
+/**
+ * Класс, представляющий результат отправки сообщения с метаданными токенов.
+ */
+data class AgentResponse(
+    val text: String,
+    val requestTokens: Int = 0,
+    val responseTokens: Int = 0,
+    val totalHistoryTokens: Int = 0
+)
 
 class AIAgent(
-    private val context: Context, // Добавлен Context
+    private val context: Context,
     private val apiKey: String,
-    private val modelName: String = "gemini-1.5-flash"
+    private val modelName: String
 ) {
     private val generativeModel = GenerativeModel(
         modelName = modelName,
@@ -24,7 +36,6 @@ class AIAgent(
     private val HISTORY_KEY = "messages_history"
 
     init {
-        // Инициализация чата с загруженной историей
         val loadedMessages = loadChatHistory()
         val initialHistoryForLLM = loadedMessages.map { message ->
             content(role = if (message.isUser) "user" else "model") {
@@ -35,41 +46,73 @@ class AIAgent(
     }
 
     /**
-     * Отправляет сообщение в LLM и возвращает ответ.
-     * Также добавляет сообщение в историю LLM.
-     * @param text текст сообщения пользователя
-     * @return ответ от LLM или сообщение об ошибке
+     * Отправляет сообщение в LLM и возвращает ответ вместе со статистикой токенов.
      */
-    suspend fun sendMessage(text: String): String {
+    suspend fun sendMessage(text: String): AgentResponse {
         return try {
-            val response = chat.sendMessage(text) // Используем chat.sendMessage
-            response.text ?: "Пустой ответ от модели"
+            // 1. Подсчет токенов для текущего запроса
+            val requestTokens = countTokens(text)
+
+            // Отправка сообщения
+            val response = chat.sendMessage(text)
+            val responseText = response.text ?: "Пустой ответ от модели"
+
+            // 2. Подсчет токенов для ответа модели
+            val responseTokens = countTokens(responseText)
+
+            // 3. Подсчет токенов для всей истории (включая только что отправленное)
+            val totalHistoryTokens = countHistoryTokens()
+
+            Log.d("AIAgent", "Tokens - Req: $requestTokens, Res: $responseTokens, Total: $totalHistoryTokens")
+
+            AgentResponse(
+                text = responseText,
+                requestTokens = requestTokens,
+                responseTokens = responseTokens,
+                totalHistoryTokens = totalHistoryTokens
+            )
         } catch (e: Exception) {
-            "Ошибка: ${e.localizedMessage ?: "неизвестная ошибка"}"
+            AgentResponse(text = "Ошибка: ${e.localizedMessage ?: "неизвестная ошибка"}")
         }
     }
 
     /**
-     * Сохраняет историю диалога в SharedPreferences.
-     * @param messages список сообщений для сохранения
+     * Подсчитывает токены для произвольного текста.
      */
-    fun saveChatHistory(messages: List<ChatMessage>) {
-        val jsonString = Json.encodeToString(messages)
-        sharedPreferences.edit().putString(HISTORY_KEY, jsonString).apply()
+    suspend fun countTokens(text: String): Int {
+        return try {
+            val response = generativeModel.countTokens(content { text(text) })
+            response.totalTokens
+        } catch (e: Exception) {
+            0
+        }
     }
 
     /**
-     * Загружает историю диалога из SharedPreferences.
-     * @return список загруженных сообщений или пустой список, если история не найдена
+     * Подсчитывает токены для всей текущей истории диалога.
      */
+    suspend fun countHistoryTokens(): Int {
+        return try {
+            // Преобразуем историю чата в массив Content для метода countTokens
+            val historyContent = chat.history
+            val response = generativeModel.countTokens(*historyContent.toTypedArray())
+            response.totalTokens
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    fun saveChatHistory(messages: List<ChatMessage>) {
+        val jsonString = Json.encodeToString(messages)
+        sharedPreferences.edit { putString(HISTORY_KEY, jsonString) }
+    }
+
     fun loadChatHistory(): List<ChatMessage> {
         val jsonString = sharedPreferences.getString(HISTORY_KEY, null)
         return if (jsonString != null) {
             try {
                 Json.decodeFromString<List<ChatMessage>>(jsonString)
             } catch (e: Exception) {
-                // В случае ошибки десериализации, возвращаем пустой список и логируем ошибку
-                // (в реальном приложении здесь можно добавить Log.e)
                 emptyList()
             }
         } else {

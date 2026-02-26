@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,13 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.platform.LocalContext // Added
+import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import vice.code.aiagent.ui.theme.AIAgentTheme
 
 @Serializable
-data class ChatMessage(val text: String, val isUser: Boolean)
+data class ChatMessage(val text: String, val isUser: Boolean, val tokens: Int = 0)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,25 +57,32 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ChatScreen(modifier: Modifier = Modifier) {
-    val context = LocalContext.current // Get context
+    val context = LocalContext.current
     val apiKey = ""
 
-    // Создаём агента один раз, передавая context
     val agent = remember { AIAgent(context = context, apiKey = apiKey, modelName = "gemini-2.5-flash") }
 
-    // Состояния UI
     val messages = remember { mutableStateListOf<ChatMessage>() }
     var inputMessage by rememberSaveable { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
+    var totalHistoryTokens by remember { mutableIntStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Загружаем историю чата при первом запуске ChatScreen
     LaunchedEffect(Unit) {
-        messages.addAll(agent.loadChatHistory())
+        val history = agent.loadChatHistory()
+        messages.addAll(history)
+        totalHistoryTokens = agent.countHistoryTokens()
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // Список сообщений
+        // Отображение общего количества токенов в истории
+        Text(
+            text = "Токенов в истории: $totalHistoryTokens",
+            modifier = Modifier.padding(8.dp).align(Alignment.CenterHorizontally),
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.Gray
+        )
+
         LazyColumn(
             modifier = Modifier
                 .weight(1f)
@@ -92,7 +100,6 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        // Поле ввода и кнопка отправки
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -110,17 +117,22 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 onClick = {
                     val userText = inputMessage.trim()
                     if (userText.isNotBlank()) {
-                        // Добавляем сообщение пользователя
-                        messages.add(ChatMessage(text = userText, isUser = true))
-                        inputMessage = ""
-                        isLoading = true
-                        agent.saveChatHistory(messages) // Сохраняем историю после добавления сообщения пользователя
-
                         coroutineScope.launch {
-                            // Вызов агента (инкапсулированная логика)
-                            val responseText = agent.sendMessage(userText)
-                            messages.add(ChatMessage(text = responseText, isUser = false))
-                            agent.saveChatHistory(messages) // Сохраняем историю после получения ответа от LLM
+                            val requestTokens = agent.countTokens(userText)
+                            messages.add(ChatMessage(text = userText, isUser = true, tokens = requestTokens))
+                            inputMessage = ""
+                            isLoading = true
+                            agent.saveChatHistory(messages)
+
+                            val response = agent.sendMessage(userText)
+                            messages.add(ChatMessage(
+                                text = response.text, 
+                                isUser = false, 
+                                tokens = response.responseTokens
+                            ))
+                            totalHistoryTokens = response.totalHistoryTokens
+                            
+                            agent.saveChatHistory(messages)
                             isLoading = false
                         }
                     }
@@ -141,7 +153,7 @@ fun MessageItem(message: ChatMessage) {
         horizontalAlignment = if (message.isUser) Alignment.End else Alignment.Start
     ) {
         Text(
-            text = if (message.isUser) "Вы" else "Ассистент",
+            text = if (message.isUser) "Вы (${message.tokens} токенов)" else "Ассистент (${message.tokens} токенов)",
             style = MaterialTheme.typography.labelSmall,
             color = Color.Gray
         )
