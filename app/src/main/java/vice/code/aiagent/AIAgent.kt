@@ -9,10 +9,14 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import androidx.core.content.edit
+import androidx.compose.runtime.*
 
-/**
- * Класс, представляющий результат отправки сообщения с метаданными токенов.
- */
+enum class ChatStrategy {
+    SLIDING_WINDOW,
+    STICKY_FACTS,
+    BRANCHING
+}
+
 data class AgentResponse(
     val text: String,
     val requestTokens: Int = 0,
@@ -23,100 +27,193 @@ data class AgentResponse(
 class AIAgent(
     private val context: Context,
     private val apiKey: String,
-    private val modelName: String
+    private val modelName: String = "gemini-2.5-flash"
 ) {
-    private val generativeModel = GenerativeModel(
-        modelName = modelName,
-        apiKey = apiKey
-    )
+    // Состояние стратегий и профиля
+    var currentStrategy by mutableStateOf(ChatStrategy.SLIDING_WINDOW)
+        private set
+        
+    var facts by mutableStateOf("")
+        private set
+        
+    var activeBranch by mutableStateOf("main")
+        private set
 
-    private var chat: Chat
+    var userProfile by mutableStateOf("")
+        private set
+    
+    private val sharedPreferences = context.getSharedPreferences("ai_agent_prefs", Context.MODE_PRIVATE)
+    
+    private val HISTORY_PREFIX = "history_"
+    private val FACTS_KEY = "chat_facts"
+    private val STRATEGY_KEY = "current_strategy"
+    private val BRANCHES_LIST_KEY = "branches_list"
+    private val PROFILE_KEY = "user_profile"
 
-    private val sharedPreferences = context.getSharedPreferences("chat_history", Context.MODE_PRIVATE)
-    private val HISTORY_KEY = "messages_history"
+    private val MAX_WINDOW_SIZE = 10
+
+    private var generativeModel: GenerativeModel
+    private lateinit var chat: Chat
 
     init {
-        val loadedMessages = loadChatHistory()
-        val initialHistoryForLLM = loadedMessages.map { message ->
-            content(role = if (message.isUser) "user" else "model") {
-                text(message.text)
-            }
-        }
-        chat = generativeModel.startChat(history = initialHistoryForLLM.toMutableList())
+        // Загрузка состояния
+        val savedStrategy = sharedPreferences.getString(STRATEGY_KEY, ChatStrategy.SLIDING_WINDOW.name)!!
+        currentStrategy = ChatStrategy.valueOf(savedStrategy)
+        facts = sharedPreferences.getString(FACTS_KEY, "") ?: ""
+        activeBranch = sharedPreferences.getString("active_branch", "main") ?: "main"
+        userProfile = sharedPreferences.getString(PROFILE_KEY, "Ты полезный ассистент. Отвечай кратко и по делу.") ?: ""
+        
+        // Инициализация модели с системной инструкцией (профилем)
+        generativeModel = createModel()
+        initializeChat()
     }
 
-    /**
-     * Отправляет сообщение в LLM и возвращает ответ вместе со статистикой токенов.
-     */
+    private fun createModel(): GenerativeModel {
+        return GenerativeModel(
+            modelName = modelName,
+            apiKey = apiKey,
+            systemInstruction = content { text(userProfile) }
+        )
+    }
+
+    fun initializeChat() {
+        val history = loadChatHistory(activeBranch)
+        val historyForLLM = mutableListOf<com.google.ai.client.generativeai.type.Content>()
+
+        when (currentStrategy) {
+            ChatStrategy.SLIDING_WINDOW -> {
+                history.takeLast(MAX_WINDOW_SIZE).forEach { msg ->
+                    historyForLLM.add(content(role = if (msg.isUser) "user" else "model") { text(msg.text) })
+                }
+            }
+            ChatStrategy.STICKY_FACTS -> {
+                if (facts.isNotEmpty()) {
+                    historyForLLM.add(content(role = "user") { text("Дополнительные факты о пользователе: $facts") })
+                    historyForLLM.add(content(role = "model") { text("Понял. Я буду учитывать эти факты вместе с твоим профилем.") })
+                }
+                history.takeLast(MAX_WINDOW_SIZE).forEach { msg ->
+                    historyForLLM.add(content(role = if (msg.isUser) "user" else "model") { text(msg.text) })
+                }
+            }
+            ChatStrategy.BRANCHING -> {
+                history.forEach { msg ->
+                    historyForLLM.add(content(role = if (msg.isUser) "user" else "model") { text(msg.text) })
+                }
+            }
+        }
+        chat = generativeModel.startChat(history = historyForLLM)
+    }
+
     suspend fun sendMessage(text: String): AgentResponse {
         return try {
-            // 1. Подсчет токенов для текущего запроса
-            val requestTokens = countTokens(text)
-
-            // Отправка сообщения
             val response = chat.sendMessage(text)
-            val responseText = response.text ?: "Пустой ответ от модели"
-
-            // 2. Подсчет токенов для ответа модели
-            val responseTokens = countTokens(responseText)
-
-            // 3. Подсчет токенов для всей истории (включая только что отправленное)
-            val totalHistoryTokens = countHistoryTokens()
-
-            Log.d("AIAgent", "Tokens - Req: $requestTokens, Res: $responseTokens, Total: $totalHistoryTokens")
+            val responseText = response.text ?: ""
+            
+            if (currentStrategy == ChatStrategy.STICKY_FACTS) {
+                updateFacts(text, responseText)
+            }
 
             AgentResponse(
                 text = responseText,
-                requestTokens = requestTokens,
-                responseTokens = responseTokens,
-                totalHistoryTokens = totalHistoryTokens
+                requestTokens = countTokens(text),
+                responseTokens = countTokens(responseText),
+                totalHistoryTokens = countHistoryTokens()
             )
         } catch (e: Exception) {
-            AgentResponse(text = "Ошибка: ${e.localizedMessage ?: "неизвестная ошибка"}")
+            Log.e("AIAgent", "sendMessage failed", e)
+            AgentResponse(text = "Ошибка: ${e.localizedMessage ?: "Неизвестная ошибка API"}")
         }
     }
 
-    /**
-     * Подсчитывает токены для произвольного текста.
-     */
+    private suspend fun updateFacts(userText: String, aiText: String) {
+        val prompt = """
+            На основе следующего диалога обнови список ключевых фактов.
+            Текущие факты: $facts
+            Новый диалог:
+            Пользователь: $userText
+            Ассистент: $aiText
+            
+            Верни только обновленный список фактов одним абзацем.
+        """.trimIndent()
+        try {
+            val res = generativeModel.generateContent(prompt)
+            val newFacts = res.text ?: facts
+            if (newFacts != facts) {
+                facts = newFacts
+                sharedPreferences.edit { putString(FACTS_KEY, facts) }
+            }
+        } catch (e: Exception) {
+            Log.e("AIAgent", "Fact extraction failed", e)
+        }
+    }
+
+    fun setStrategy(strategy: ChatStrategy) {
+        currentStrategy = strategy
+        sharedPreferences.edit { putString(STRATEGY_KEY, strategy.name) }
+        initializeChat()
+    }
+
+    fun setUserProfile(profile: String) {
+        userProfile = profile
+        sharedPreferences.edit { putString(PROFILE_KEY, profile) }
+        // При смене профиля нужно пересоздать модель и чат, так как systemInstruction задается при создании
+        generativeModel = createModel()
+        initializeChat()
+    }
+
+    fun createBranch(name: String) {
+        val currentHistory = loadChatHistory(activeBranch)
+        saveChatHistory(name, currentHistory)
+        
+        val branches = getBranches().toMutableSet()
+        branches.add(name)
+        sharedPreferences.edit { putStringSet(BRANCHES_LIST_KEY, branches) }
+        
+        switchBranch(name)
+    }
+
+    fun switchBranch(name: String) {
+        activeBranch = name
+        sharedPreferences.edit { putString("active_branch", name) }
+        initializeChat()
+    }
+
+    fun getBranches(): List<String> {
+        return sharedPreferences.getStringSet(BRANCHES_LIST_KEY, setOf("main"))?.toList() ?: listOf("main")
+    }
+
     suspend fun countTokens(text: String): Int {
+        if (text.isBlank()) return 0
         return try {
-            val response = generativeModel.countTokens(content { text(text) })
-            response.totalTokens
+            generativeModel.countTokens(text).totalTokens
         } catch (e: Exception) {
             0
         }
     }
 
-    /**
-     * Подсчитывает токены для всей текущей истории диалога.
-     */
     suspend fun countHistoryTokens(): Int {
+        val history = chat.history
+        if (history.isEmpty()) return 0
         return try {
-            // Преобразуем историю чата в массив Content для метода countTokens
-            val historyContent = chat.history
-            val response = generativeModel.countTokens(*historyContent.toTypedArray())
-            response.totalTokens
+            generativeModel.countTokens(*history.toTypedArray()).totalTokens
         } catch (e: Exception) {
             0
         }
     }
 
-    fun saveChatHistory(messages: List<ChatMessage>) {
+    fun saveChatHistory(branch: String, messages: List<ChatMessage>) {
         val jsonString = Json.encodeToString(messages)
-        sharedPreferences.edit { putString(HISTORY_KEY, jsonString) }
+        sharedPreferences.edit { putString(HISTORY_PREFIX + branch, jsonString) }
     }
 
-    fun loadChatHistory(): List<ChatMessage> {
-        val jsonString = sharedPreferences.getString(HISTORY_KEY, null)
+    fun loadChatHistory(branch: String): List<ChatMessage> {
+        val jsonString = sharedPreferences.getString(HISTORY_PREFIX + branch, null)
         return if (jsonString != null) {
             try {
-                Json.decodeFromString<List<ChatMessage>>(jsonString)
+                Json.decodeFromString(jsonString)
             } catch (e: Exception) {
                 emptyList()
             }
-        } else {
-            emptyList()
-        }
+        } else emptyList()
     }
 }
