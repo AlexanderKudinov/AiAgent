@@ -87,7 +87,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        // 2. Инфо-панель
+        // 2. Инфо-панель (включая State Machine)
         Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(8.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Tokens: $totalHistoryTokens | Branch: ${agent.activeBranch}", style = MaterialTheme.typography.labelSmall)
@@ -99,6 +99,23 @@ fun ChatScreen(modifier: Modifier = Modifier) {
                 }
             }
             
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                Text("State: ${agent.currentTaskState.name} | Step: ${agent.currentStep}", style = MaterialTheme.typography.bodySmall)
+                
+                // Кнопка для ручного перехода по State Machine
+                Button(onClick = {
+                    when (agent.currentTaskState) {
+                        TaskState.PLANNING -> agent.transitionTo(TaskState.EXECUTION, "2. Starting actual implementation.")
+                        TaskState.EXECUTION -> agent.transitionTo(TaskState.VALIDATION, "3. Reviewing results.")
+                        TaskState.VALIDATION -> agent.transitionTo(TaskState.DONE, "4. Task completed.")
+                        TaskState.DONE -> agent.transitionTo(TaskState.PLANNING, "1. Analyzing request.")
+                    }
+                    refreshChat() // Перезагружаем чат, чтобы LLM увидела новое системное сообщение
+                }, modifier = Modifier.padding(start = 8.dp).height(28.dp), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
+                    Text("Next", fontSize = 10.sp)
+                }
+            }
+
             if (agent.currentStrategy == ChatStrategy.STICKY_FACTS && agent.facts.isNotEmpty()) {
                 Text("Facts: ${agent.facts}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 1)
             }
@@ -188,7 +205,7 @@ fun ChatScreen(modifier: Modifier = Modifier) {
             },
             confirmButton = {
                 Button(onClick = {
-                    agent.setUserProfile(editedProfile)
+                    agent.updateUserProfile(editedProfile)
                     showProfileDialog = false
                     refreshChat()
                 }) { Text("Сохранить") }

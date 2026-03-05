@@ -17,6 +17,13 @@ enum class ChatStrategy {
     BRANCHING
 }
 
+enum class TaskState {
+    PLANNING,
+    EXECUTION,
+    VALIDATION,
+    DONE
+}
+
 data class AgentResponse(
     val text: String,
     val requestTokens: Int = 0,
@@ -29,7 +36,7 @@ class AIAgent(
     private val apiKey: String,
     private val modelName: String = "gemini-2.5-flash"
 ) {
-    // Состояние стратегий и профиля
+    // Состояние стратегий, профиля и задачи
     var currentStrategy by mutableStateOf(ChatStrategy.SLIDING_WINDOW)
         private set
         
@@ -39,7 +46,15 @@ class AIAgent(
     var activeBranch by mutableStateOf("main")
         private set
 
+    // Свойство userProfile имеет автоматический сеттер. Мы делаем его приватным,
+    // чтобы не конфликтовать с нашей ручной функцией updateUserProfile.
     var userProfile by mutableStateOf("")
+        private set
+        
+    var currentTaskState by mutableStateOf(TaskState.PLANNING)
+        private set
+        
+    var currentStep by mutableStateOf("1. Analyzing request.")
         private set
     
     private val sharedPreferences = context.getSharedPreferences("ai_agent_prefs", Context.MODE_PRIVATE)
@@ -49,6 +64,8 @@ class AIAgent(
     private val STRATEGY_KEY = "current_strategy"
     private val BRANCHES_LIST_KEY = "branches_list"
     private val PROFILE_KEY = "user_profile"
+    private val TASK_STATE_KEY = "task_state"
+    private val TASK_STEP_KEY = "task_step"
 
     private val MAX_WINDOW_SIZE = 10
 
@@ -62,6 +79,10 @@ class AIAgent(
         facts = sharedPreferences.getString(FACTS_KEY, "") ?: ""
         activeBranch = sharedPreferences.getString("active_branch", "main") ?: "main"
         userProfile = sharedPreferences.getString(PROFILE_KEY, "Ты полезный ассистент. Отвечай кратко и по делу.") ?: ""
+        
+        // Загрузка состояния задачи
+        currentTaskState = TaskState.valueOf(sharedPreferences.getString(TASK_STATE_KEY, TaskState.PLANNING.name)!!)
+        currentStep = sharedPreferences.getString(TASK_STEP_KEY, "1. Analyzing request.") ?: "1. Analyzing request."
         
         // Инициализация модели с системной инструкцией (профилем)
         generativeModel = createModel()
@@ -79,6 +100,12 @@ class AIAgent(
     fun initializeChat() {
         val history = loadChatHistory(activeBranch)
         val historyForLLM = mutableListOf<com.google.ai.client.generativeai.type.Content>()
+
+        // Добавляем информацию о текущем состоянии задачи в начало контекста, если это не DONE
+        if (currentTaskState != TaskState.DONE) {
+             historyForLLM.add(content(role = "user") { text("Текущий этап задачи: ${currentTaskState.name}, Шаг: $currentStep. Продолжай работу.") })
+             historyForLLM.add(content(role = "model") { text("Принято. Продолжаю выполнение этапа ${currentTaskState.name}.") })
+        }
 
         when (currentStrategy) {
             ChatStrategy.SLIDING_WINDOW -> {
@@ -153,11 +180,25 @@ class AIAgent(
         initializeChat()
     }
 
-    fun setUserProfile(profile: String) {
+    // ИСПОЛЬЗУЕМ ЭТУ ФУНКЦИЮ ДЛЯ УСТАНОВКИ ПРОФИЛЯ
+    fun updateUserProfile(profile: String) {
         userProfile = profile
         sharedPreferences.edit { putString(PROFILE_KEY, profile) }
         // При смене профиля нужно пересоздать модель и чат, так как systemInstruction задается при создании
         generativeModel = createModel()
+        initializeChat()
+    }
+    
+    fun transitionTo(newState: TaskState, newStep: String? = null) {
+        currentTaskState = newState
+        sharedPreferences.edit { putString(TASK_STATE_KEY, newState.name) }
+        
+        if (newStep != null) {
+            currentStep = newStep
+            sharedPreferences.edit { putString(TASK_STEP_KEY, newStep) }
+        }
+        
+        // При смене состояния или шага нужно перезапустить чат с новым системным контекстом
         initializeChat()
     }
 
