@@ -39,26 +39,24 @@ class AIAgent(
     // Состояние стратегий, профиля и задачи
     var currentStrategy by mutableStateOf(ChatStrategy.SLIDING_WINDOW)
         private set
-        
+
     var facts by mutableStateOf("")
         private set
-        
+
     var activeBranch by mutableStateOf("main")
         private set
 
-    // Свойство userProfile имеет автоматический сеттер. Мы делаем его приватным,
-    // чтобы не конфликтовать с нашей ручной функцией updateUserProfile.
     var userProfile by mutableStateOf("")
         private set
-        
+
     var currentTaskState by mutableStateOf(TaskState.PLANNING)
         private set
-        
+
     var currentStep by mutableStateOf("1. Analyzing request.")
         private set
-    
+
     private val sharedPreferences = context.getSharedPreferences("ai_agent_prefs", Context.MODE_PRIVATE)
-    
+
     private val HISTORY_PREFIX = "history_"
     private val FACTS_KEY = "chat_facts"
     private val STRATEGY_KEY = "current_strategy"
@@ -79,11 +77,11 @@ class AIAgent(
         facts = sharedPreferences.getString(FACTS_KEY, "") ?: ""
         activeBranch = sharedPreferences.getString("active_branch", "main") ?: "main"
         userProfile = sharedPreferences.getString(PROFILE_KEY, "Ты полезный ассистент. Отвечай кратко и по делу.") ?: ""
-        
+
         // Загрузка состояния задачи
         currentTaskState = TaskState.valueOf(sharedPreferences.getString(TASK_STATE_KEY, TaskState.PLANNING.name)!!)
         currentStep = sharedPreferences.getString(TASK_STEP_KEY, "1. Analyzing request.") ?: "1. Analyzing request."
-        
+
         // Инициализация модели с системной инструкцией (профилем)
         generativeModel = createModel()
         initializeChat()
@@ -135,7 +133,7 @@ class AIAgent(
         return try {
             val response = chat.sendMessage(text)
             val responseText = response.text ?: ""
-            
+
             if (currentStrategy == ChatStrategy.STICKY_FACTS) {
                 updateFacts(text, responseText)
             }
@@ -180,7 +178,6 @@ class AIAgent(
         initializeChat()
     }
 
-    // ИСПОЛЬЗУЕМ ЭТУ ФУНКЦИЮ ДЛЯ УСТАНОВКИ ПРОФИЛЯ
     fun updateUserProfile(profile: String) {
         userProfile = profile
         sharedPreferences.edit { putString(PROFILE_KEY, profile) }
@@ -188,8 +185,21 @@ class AIAgent(
         generativeModel = createModel()
         initializeChat()
     }
-    
+
+    private fun isTransitionAllowed(fromState: TaskState, toState: TaskState): Boolean = when (fromState) {
+        TaskState.PLANNING -> toState == TaskState.EXECUTION || toState == TaskState.DONE
+        TaskState.EXECUTION -> toState == TaskState.VALIDATION || toState == TaskState.PLANNING
+        TaskState.VALIDATION -> toState == TaskState.DONE || toState == TaskState.PLANNING
+        TaskState.DONE -> toState == TaskState.PLANNING
+    }
+
     fun transitionTo(newState: TaskState, newStep: String? = null) {
+        if (!isTransitionAllowed(currentTaskState, newState)) {
+            Log.w("AIAgent", "Transition from ${currentTaskState.name} to ${newState.name} is not allowed by state machine rules.")
+            // Можно уведомить UI здесь, если нужно
+            return
+        }
+
         currentTaskState = newState
         sharedPreferences.edit { putString(TASK_STATE_KEY, newState.name) }
         
